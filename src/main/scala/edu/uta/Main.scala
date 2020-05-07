@@ -3,7 +3,12 @@ package edu.uta
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.{SparkConf, SparkContext}
 
-case class Record(comment: List[String], game: String, rating: Double)
+import scala.collection.JavaConversions._
+
+case class Record(comment: List[String], rating: Double)
+case class TFIDF(vector: List[Double], rating: Double)
+
+case class IDF(term: String, doesExist: Int)
 
 object Main {
   val stopwords = List("i", "me", "my", "myself", "we", "our", "ours", "ourselves", "you", "your", "yours", "yourself",
@@ -44,34 +49,42 @@ object Main {
 
     val cleanedData = data.filter($"comment" isNotNull).map(row => {
       Record(
-        game = row.getAs[String]("name"),
         comment = row.getAs[String]("comment")
           .toLowerCase()
           .replaceAll("</?\\w+/?>", "")
           .replaceAll("https?://\\w+.\\w+.\\w+", "")
+          .replaceAll("('|\\d)", "")
           .replaceAll("\\W+", " ")
-          .split("\\s+").filterNot(stopw.value.contains).toList,
+          .split("\\s+")
+          .filter(_.length >= 3)
+          .filterNot(stopw.value.contains).toList,
         rating = row.getAs[Double]("rating")
       )
-    })
+    }).sample(false, 0.1)
 
-    val wordCounts = cleanedData.flatMap(row => row.comment.toList)
+    val topWords = cleanedData.flatMap(row => row.comment.toList)
       .groupBy("value").count().orderBy(desc("count"))
-    val topWords = wordCounts.limit(2000).agg(collect_list("value").as("topWords"))
-    val rareWords = wordCounts.filter($"count" <= 5).agg(collect_list("value").as("rarewords"))
+      .limit(2000).toDF("topword", "topwordcount")
 
-    /*    val withoutRareWords = cleanedData.crossJoin(rareWords).map(row=>{
-          val rare = row.getList[String](3)
-          val cmt = row.getList[String](0).asScala.filterNot(rare.contains).toList
-          Record(
-            game= row.getAs[String]("game"),
-            comment = cmt,
-            rating = row.getAs[Double]("rating")
-          )
-        })*/
-    wordCounts.write.json("src/main/resources/_processed/JSON/wordcounts")
-    rareWords.write.json("src/main/resources/_processed/JSON/rarewords_10")
-    cleanedData.write.json("src/main/resources/_processed/JSON/cleandata")
+    val termIDF = cleanedData.flatMap(_.comment.toSet)
+      .groupBy("value")
+      .count().toDF("word", "count")
+      .join(topWords, $"word" === $"topword", "right")
+      .select($"word" as "term", log(lit(2638172) / $"count") as "IDF")
 
+    val tfIDF = cleanedData.crossJoin(termIDF.agg(collect_list(concat_ws("$", $"term",$"IDF")))).map(row => {
+      val terms = row.getList[String](2)
+      val comments = row.getList[String](0)
+      TFIDF(
+        rating = row.getDouble(1),
+        vector = terms.map(tupl => {
+          val split = tupl.split("\\$")
+          val (term, termIDF) = (split(0), split(1).toDouble)
+          val tf = comments.count(_ == term).toDouble / comments.length
+          tf*termIDF
+        }).toList
+      )
+    })
+    tfIDF.coalesce(1).write.json("src/main/resources/_processed/JSON/tfidf")
   }
 }
