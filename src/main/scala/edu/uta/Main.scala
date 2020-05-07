@@ -6,7 +6,8 @@ import org.apache.spark.{SparkConf, SparkContext}
 import scala.collection.JavaConversions._
 
 case class Record(comment: List[String], rating: Double)
-case class TFIDF(vector: List[Double], rating: Double)
+
+case class TFIDF(vector: List[Float], rating: Double)
 
 case class IDF(term: String, doesExist: Int)
 
@@ -24,8 +25,8 @@ object Main {
   def main(args: Array[String]): Unit = {
     val conf = new SparkConf()
       .setAppName("BGReview ETL")
-      .set("spark.driver.memory", "6g")
-      .set("spark.default.parallelism", "6")
+      /*.set("spark.driver.memory", "6g")
+      .set("spark.default.parallelism", "6")*/
       .set("spark.driver.cores", "6")
       .setMaster("local[6]")
     val sc = new SparkContext(conf)
@@ -46,25 +47,30 @@ object Main {
       .csv("src/main/resources/bgg-13m-reviews.csv")
 
     val stopw = sc.broadcast(stopwords)
+    val numTopWords = sc.broadcast(2000)
+    val samplingFrac = sc.broadcast(0.01F)
 
-    val cleanedData = data.filter($"comment" isNotNull).map(row => {
-      Record(
-        comment = row.getAs[String]("comment")
-          .toLowerCase()
-          .replaceAll("</?\\w+/?>", "")
-          .replaceAll("https?://\\w+.\\w+.\\w+", "")
-          .replaceAll("('|\\d)", "")
-          .replaceAll("\\W+", " ")
-          .split("\\s+")
-          .filter(_.length >= 3)
-          .filterNot(stopw.value.contains).toList,
-        rating = row.getAs[Double]("rating")
-      )
-    }).sample(false, 0.1)
+    val cleanedData = data.filter($"comment" isNotNull)
+      .sample(withReplacement = false, fraction = samplingFrac.value)
+      .map(row => {
+        Record(
+          comment = row.getAs[String]("comment")
+            .toLowerCase()
+            .replaceAll("</?\\w+/?>", "")
+            .replaceAll("https?://\\w+.\\w+.\\w+", "")
+            .replaceAll("('|\\d)", "")
+            .replaceAll("\\W+", " ")
+            .split("\\s+")
+            .filter(_.length >= 3)
+            .filterNot(stopw.value.contains).toList,
+          rating = row.getAs[Double]("rating")
+        )
+      })
+    /*cleanedData.persist(StorageLevel.MEMORY_AND_DISK)*/
 
     val topWords = cleanedData.flatMap(row => row.comment.toList)
       .groupBy("value").count().orderBy(desc("count"))
-      .limit(2000).toDF("topword", "topwordcount")
+      .limit(numTopWords.value).toDF("topword", "topwordcount")
 
     val termIDF = cleanedData.flatMap(_.comment.toSet)
       .groupBy("value")
@@ -72,7 +78,7 @@ object Main {
       .join(topWords, $"word" === $"topword", "right")
       .select($"word" as "term", log(lit(2638172) / $"count") as "IDF")
 
-    val tfIDF = cleanedData.crossJoin(termIDF.agg(collect_list(concat_ws("$", $"term",$"IDF")))).map(row => {
+    val tfIDF = cleanedData.crossJoin(termIDF.agg(collect_list(concat_ws("$", $"term", $"IDF")))).map(row => {
       val terms = row.getList[String](2)
       val comments = row.getList[String](0)
       TFIDF(
@@ -81,10 +87,13 @@ object Main {
           val split = tupl.split("\\$")
           val (term, termIDF) = (split(0), split(1).toDouble)
           val tf = comments.count(_ == term).toDouble / comments.length
-          tf*termIDF
+          (tf * termIDF).toFloat
         }).toList
       )
     })
     tfIDF.coalesce(1).write.json("src/main/resources/_processed/JSON/tfidf")
+    /*cleanedData.unpersist()*/
+    spark.stop()
+    sc.stop()
   }
 }
