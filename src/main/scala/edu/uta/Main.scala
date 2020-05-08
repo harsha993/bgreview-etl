@@ -13,20 +13,18 @@ case class IDF(term: String, doesExist: Int)
 
 object Main {
   val stopwords = List("i", "me", "my", "myself", "we", "our", "ours", "ourselves", "you", "your", "yours", "yourself",
-    "yourselves", "he", "him", "his", "himself", "she", "her", "hers", "herself", "it", "its", "itself", "they", "them", "their",
-    "theirs", "themselves", "what", "which", "who", "whom", "this", "that", "these", "those", "am", "is", "are", "was", "were", "be",
-    "been", "being", "have", "has", "had", "having", "do", "does", "did", "doing", "a", "an", "the", "and", "but", "if", "or", "because",
-    "as", "until", "while", "of", "at", "by", "for", "with", "about", "against", "between", "into", "through", "during", "before",
-    "after", "above", "below", "to", "from", "up", "down", "in", "out", "on", "off", "over", "under", "again", "further", "then",
-    "once", "here", "there", "when", "where", "why", "how", "all", "any", "both", "each", "few", "more", "most", "other", "some",
-    "such", "no", "nor", "not", "only", "own", "same", "so", "than", "too", "very", "s", "t", "can", "will", "just", "don", "should"
-    , "now")
+    "yourselves", "he", "him", "his", "himself", "she", "her", "hers", "herself", "it", "its", "itself", "they", "them",
+    "their", "theirs", "themselves", "what", "which", "who", "whom", "this", "that", "these", "those", "am", "is",
+    "are", "was", "were", "be", "been", "being", "have", "has", "had", "having", "do", "does", "did", "doing", "a",
+    "an", "the", "and", "but", "if", "or", "because", "as", "until", "while", "of", "at", "by", "for", "with",
+    "about", "against", "between", "into", "through", "during", "before", "after", "above", "below", "to", "from", "up",
+    "down", "in", "out", "on", "off", "over", "under", "again", "further", "then", "once", "here", "there", "when",
+    "where", "why", "how", "all", "any", "both", "each", "few", "more", "most", "other", "some", "such", "no", "nor",
+    "not", "only", "own", "same", "so", "than", "too", "very", "s", "t", "can", "will", "just", "don", "should", "now")
 
   def main(args: Array[String]): Unit = {
     val conf = new SparkConf()
       .setAppName("BGReview ETL")
-      /*.set("spark.driver.memory", "6g")
-      .set("spark.default.parallelism", "6")*/
       .set("spark.driver.cores", "6")
       .setMaster("local[6]")
     val sc = new SparkContext(conf)
@@ -44,14 +42,14 @@ object Main {
       .read
       .option("inferSchema", "true")
       .option("header", "true")
-      .csv("src/main/resources/bgg-13m-reviews.csv")
+      .csv(args.head)
 
     val stopw = sc.broadcast(stopwords)
-    val numTopWords = sc.broadcast(2000)
-    val samplingFrac = sc.broadcast(0.01F)
+    val numTopWords = sc.broadcast(args(1).toInt)
+    val samplingFrac = sc.broadcast(args(2).toFloat)
 
     val cleanedData = data.filter($"comment" isNotNull)
-      .sample(withReplacement = false, fraction = samplingFrac.value)
+    val trainData = cleanedData.sample(withReplacement = false, fraction = samplingFrac.value)
       .map(row => {
         Record(
           comment = row.getAs[String]("comment")
@@ -68,30 +66,32 @@ object Main {
       })
     /*cleanedData.persist(StorageLevel.MEMORY_AND_DISK)*/
 
-    val topWords = cleanedData.flatMap(row => row.comment.toList)
+    val topWords = trainData.flatMap(row => row.comment.toList)
       .groupBy("value").count().orderBy(desc("count"))
       .limit(numTopWords.value).toDF("topword", "topwordcount")
 
-    val termIDF = cleanedData.flatMap(_.comment.toSet)
+    val termIDF = trainData.flatMap(_.comment.toSet)
       .groupBy("value")
       .count().toDF("word", "count")
       .join(topWords, $"word" === $"topword", "right")
       .select($"word" as "term", log(lit(2638172) / $"count") as "IDF")
 
-    val tfIDF = cleanedData.crossJoin(termIDF.agg(collect_list(concat_ws("$", $"term", $"IDF")))).map(row => {
-      val terms = row.getList[String](2)
-      val comments = row.getList[String](0)
-      TFIDF(
-        rating = row.getDouble(1),
-        vector = terms.map(tupl => {
-          val split = tupl.split("\\$")
-          val (term, termIDF) = (split(0), split(1).toDouble)
-          val tf = comments.count(_ == term).toDouble / comments.length
-          (tf * termIDF).toFloat
-        }).toList
-      )
-    })
-    tfIDF.coalesce(1).write.json("src/main/resources/_processed/JSON/tfidf")
+    val trainTFIDF = trainData.crossJoin(termIDF.agg(collect_list(concat_ws("$", $"term", $"IDF"))))
+      .map(row => {
+        val terms = row.getList[String](2)
+        val comments = row.getList[String](0)
+        TFIDF(
+          rating = row.getDouble(1),
+          vector = terms.map(tupl => {
+            val split = tupl.split("\\$")
+            val (term, termIDF) = (split(0), split(1).toDouble)
+            val tf = comments.count(_ == term).toDouble / comments.length
+            (tf * termIDF).toFloat
+          }).toList
+        )
+      })
+    termIDF.coalesce(1).write.json("src/main/resources/_processed/JSON/IDF")
+    trainTFIDF.coalesce(1).write.json("src/main/resources/_processed/JSON/TrainData")
     /*cleanedData.unpersist()*/
     spark.stop()
     sc.stop()
