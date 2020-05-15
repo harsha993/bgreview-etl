@@ -5,7 +5,7 @@ import org.apache.spark.{SparkConf, SparkContext}
 
 import scala.collection.JavaConversions._
 
-case class Record(comment: List[String], rating: Double)
+case class Record(comment: String, rating: Double)
 
 case class TFIDF(vector: List[Float], rating: Double)
 
@@ -60,13 +60,13 @@ object Main {
             .replaceAll("\\W+", " ")
             .split("\\s+")
             .filter(_.length >= 3)
-            .filterNot(stopw.value.contains).toList,
+            .filterNot(stopw.value.contains).mkString(" "),
           rating = row.getAs[Double]("rating")
         )
       })
-    /*cleanedData.persist(StorageLevel.MEMORY_AND_DISK)*/
+    trainData.coalesce(1).write.json("src/main/resources/_processed/JSON/data")
 
-    val topWords = trainData.flatMap(row => row.comment.toList)
+    /*val topWords = trainData.flatMap(row => row.comment.toList)
       .groupBy("value").count().orderBy(desc("count"))
       .limit(numTopWords.value).toDF("topword", "topwordcount")
 
@@ -92,8 +92,8 @@ object Main {
       })
     termIDF.coalesce(1).write.json("src/main/resources/_processed/JSON/IDF")
     trainTFIDF.coalesce(1).write.json("src/main/resources/_processed/JSON/TrainData")
-    /*cleanedData.unpersist()*/
+
     spark.stop()
-    sc.stop()
+    sc.stop()*/
   }
 }
